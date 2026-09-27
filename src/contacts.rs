@@ -749,8 +749,41 @@ fn source_display_name(uid: &str) -> Option<String> {
 // Writing (EDS D-Bus)
 // ---------------------------------------------------------------------------
 
+/// Find a versioned EDS bus name (`<prefix><digits>`, e.g. `…AddressBook10`)
+/// by asking the session bus itself.
+///
+/// Inside Flatpak, `/usr/share/dbus-1/services` is the *runtime's* directory
+/// and holds none of the host's EDS service files, so the file scan below
+/// finds nothing there. The bus, however, lists the host's EDS names (the
+/// `--talk-name=org.gnome.evolution.dataserver.*` grant makes them visible),
+/// so query it first and keep the file scan as a fallback.
+fn bus_dest(prefix: &str) -> Option<String> {
+    let conn = zbus::blocking::Connection::session().ok()?;
+    let proxy = zbus::blocking::fdo::DBusProxy::new(&conn).ok()?;
+    let mut names: Vec<String> =
+        proxy.list_names().unwrap_or_default().iter().map(|n| n.as_str().to_string()).collect();
+    names.extend(
+        proxy.list_activatable_names().unwrap_or_default().iter().map(|n| n.as_str().to_string()),
+    );
+    // Highest interface version wins if several are present.
+    names
+        .into_iter()
+        .filter_map(|n| {
+            let ver: u32 = n.strip_prefix(prefix)?.parse().ok()?;
+            Some((ver, n))
+        })
+        .max_by_key(|(ver, _)| *ver)
+        .map(|(_, n)| n)
+}
+
 /// Discover the versioned AddressBook factory bus name (e.g. `…AddressBook10`).
 fn factory_dest() -> Option<String> {
+    bus_dest("org.gnome.evolution.dataserver.AddressBook").or_else(factory_dest_from_files)
+}
+
+/// Fallback: read the name from the host's D-Bus service files (works outside
+/// Flatpak only).
+fn factory_dest_from_files() -> Option<String> {
     let dir = std::path::Path::new("/usr/share/dbus-1/services");
     for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
@@ -1045,6 +1078,12 @@ fn data_source_disabled(data: &str) -> bool {
 
 /// Discover the versioned Sources registry bus name (e.g. `…Sources5`).
 fn sources_dest() -> Option<String> {
+    bus_dest("org.gnome.evolution.dataserver.Sources").or_else(sources_dest_from_files)
+}
+
+/// Fallback: read the name from the host's D-Bus service files (works outside
+/// Flatpak only).
+fn sources_dest_from_files() -> Option<String> {
     let dir = std::path::Path::new("/usr/share/dbus-1/services");
     for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
